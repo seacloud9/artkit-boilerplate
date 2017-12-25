@@ -1,0 +1,21 @@
+{
+  "name": "ducks-ahoy",
+  "version": "0.0.0",
+  "description": "Ducks, Ahoy!",
+  "author": null,
+  "private": true,
+  "scripts": {
+    "clean:babelrc": "find ./node_modules -name react-packager -prune -o -name '.babelrc' -print | xargs rm -f",
+    "postinstall": "npm run clean:babelrc"
+  },
+  "main": "node_modules/expo/AppEntry.js",
+  "dependencies": {
+    "ar.js": "^1.4.10",
+    "cannon": "^0.6.2",
+    "expo": "^21.0.0",
+    "expo-three": "^2.0.2",
+    "react": "16.0.0-alpha.12",
+    "react-native": "https://github.com/expo/react-native/archive/sdk-21.0.2.tar.gz",
+    "three": "^0.87.1"
+  }
+}
