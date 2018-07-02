@@ -48,25 +48,6 @@ export default class App extends React.Component {
       />
   )
 
-  // renderInfo = () => (
-  //   <View style={{position: 'absolute',padding: 24, top: 20, left: 0, right: 0, justifyContent: 'space-around',}}>
-  //     <Text style={{textAlign: 'center', marginBottom: 8, backgroundColor: 'transparent'}}>
-  //       Simple Cloth Simulation Verlet integration with relaxed constraints
-  //     </Text>
-  //     <View style={{justifyContent: 'space-around', alignItems: 'center', flexDirection: 'row'}}>
-  //
-  //       {this.button({text: "Wind", onPress: (_=> {
-  //         wind = !wind
-  //       })})}
-  //       {this.button({text: "Ball", onPress: (_=> {
-  //         this.sphere.visible = !this.sphere.visible;
-  //       })})}
-  //       {this.button({text: "Pins", onPress: (_=> {
-  //         this.togglePins();
-  //       })})}
-  //     </View>
-  //   </View>
-  // )
 
   render = () => (
     <View style={{ flex: 1 }}>
