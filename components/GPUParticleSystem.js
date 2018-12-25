@@ -15,497 +15,477 @@
  *
  */
 
- import * as THREE from 'three';
+import * as THREE from 'three'
+
+THREE.GPUParticleSystem = function (options) {
+  var self = this
+  var options = options || {}
+
+  // parse options and use defaults
+  self.PARTICLE_COUNT = options.maxParticles || 1000000
+  self.PARTICLE_CONTAINERS = options.containerCount || 1
+
+  self.PARTICLE_NOISE_TEXTURE = options.particleNoiseTex || null
+  self.PARTICLE_SPRITE_TEXTURE = options.particleSpriteTex || null
 
+  self.PARTICLES_PER_CONTAINER = Math.ceil(self.PARTICLE_COUNT / self.PARTICLE_CONTAINERS)
+  self.PARTICLE_CURSOR = 0
+  self.time = 0
 
-THREE.GPUParticleSystem = function(options) {
+  // Custom vertex and fragement shader
+  var GPUParticleShader = {
 
-	var self = this;
-	var options = options || {};
+    vertexShader: [
 
-	// parse options and use defaults
-	self.PARTICLE_COUNT = options.maxParticles || 1000000;
-	self.PARTICLE_CONTAINERS = options.containerCount || 1;
+      'precision highp float;',
+      'const vec4 bitSh = vec4(256. * 256. * 256., 256. * 256., 256., 1.);',
+      'const vec4 bitMsk = vec4(0.,vec3(1./256.0));',
+      'const vec4 bitShifts = vec4(1.) / bitSh;',
 
-	self.PARTICLE_NOISE_TEXTURE = options.particleNoiseTex || null;
-	self.PARTICLE_SPRITE_TEXTURE = options.particleSpriteTex || null;
+      '#define FLOAT_MAX	1.70141184e38',
+      '#define FLOAT_MIN	1.17549435e-38',
 
-	self.PARTICLES_PER_CONTAINER = Math.ceil(self.PARTICLE_COUNT / self.PARTICLE_CONTAINERS);
-	self.PARTICLE_CURSOR = 0;
-	self.time = 0;
+      'lowp vec4 encode_float(highp float v) {',
+      'highp float av = abs(v);',
 
+      '//Handle special cases',
+      'if(av < FLOAT_MIN) {',
+      'return vec4(0.0, 0.0, 0.0, 0.0);',
+      '} else if(v > FLOAT_MAX) {',
+      'return vec4(127.0, 128.0, 0.0, 0.0) / 255.0;',
+      '} else if(v < -FLOAT_MAX) {',
+      'return vec4(255.0, 128.0, 0.0, 0.0) / 255.0;',
+      '}',
 
-	// Custom vertex and fragement shader
-	var GPUParticleShader = {
+      'highp vec4 c = vec4(0,0,0,0);',
 
-		vertexShader: [
+      '//Compute exponent and mantissa',
+      'highp float e = floor(log2(av));',
+      'highp float m = av * pow(2.0, -e) - 1.0;',
 
-			'precision highp float;',
-			'const vec4 bitSh = vec4(256. * 256. * 256., 256. * 256., 256., 1.);',
-			'const vec4 bitMsk = vec4(0.,vec3(1./256.0));',
-			'const vec4 bitShifts = vec4(1.) / bitSh;',
+      // Unpack mantissa
+      'c[1] = floor(128.0 * m);',
+      'm -= c[1] / 128.0;',
+      'c[2] = floor(32768.0 * m);',
+      'm -= c[2] / 32768.0;',
+      'c[3] = floor(8388608.0 * m);',
 
-			'#define FLOAT_MAX	1.70141184e38',
-			'#define FLOAT_MIN	1.17549435e-38',
+      '//Unpack exponent',
+      'highp float ebias = e + 127.0;',
+      'c[0] = floor(ebias / 2.0);',
+      'ebias -= c[0] * 2.0;',
+      'c[1] += floor(ebias) * 128.0;',
 
-			'lowp vec4 encode_float(highp float v) {',
-			'highp float av = abs(v);',
+      '//Unpack sign bit',
+      'c[0] += 128.0 * step(0.0, -v);',
 
-			'//Handle special cases',
-			'if(av < FLOAT_MIN) {',
-			'return vec4(0.0, 0.0, 0.0, 0.0);',
-			'} else if(v > FLOAT_MAX) {',
-			'return vec4(127.0, 128.0, 0.0, 0.0) / 255.0;',
-			'} else if(v < -FLOAT_MAX) {',
-			'return vec4(255.0, 128.0, 0.0, 0.0) / 255.0;',
-			'}',
+      '//Scale back to range',
+      'return c / 255.0;',
+      '}',
 
-			'highp vec4 c = vec4(0,0,0,0);',
+      'vec4 pack(const in float depth)',
+      '{',
+      'const vec4 bit_shift = vec4(256.0*256.0*256.0, 256.0*256.0, 256.0, 1.0);',
+      'const vec4 bit_mask	= vec4(0.0, 1.0/256.0, 1.0/256.0, 1.0/256.0);',
+      'vec4 res = mod(depth*bit_shift*vec4(255), vec4(256))/vec4(255);',
+      'res -= res.xxyz * bit_mask;',
+      'return res;',
+      '}',
 
-			'//Compute exponent and mantissa',
-			'highp float e = floor(log2(av));',
-			'highp float m = av * pow(2.0, -e) - 1.0;',
+      'float unpack(const in vec4 rgba_depth)',
+      '{',
+      'const vec4 bit_shift = vec4(1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0);',
+      'float depth = dot(rgba_depth, bit_shift);',
+      'return depth;',
+      '}',
 
-			//Unpack mantissa
-			'c[1] = floor(128.0 * m);',
-			'm -= c[1] / 128.0;',
-			'c[2] = floor(32768.0 * m);',
-			'm -= c[2] / 32768.0;',
-			'c[3] = floor(8388608.0 * m);',
+      'uniform float uTime;',
+      'uniform float uScale;',
+      'uniform sampler2D tNoise;',
 
-			'//Unpack exponent',
-			'highp float ebias = e + 127.0;',
-			'c[0] = floor(ebias / 2.0);',
-			'ebias -= c[0] * 2.0;',
-			'c[1] += floor(ebias) * 128.0;',
+      'attribute vec4 particlePositionsStartTime;',
+      'attribute vec4 particleVelColSizeLife;',
 
-			'//Unpack sign bit',
-			'c[0] += 128.0 * step(0.0, -v);',
+      'varying vec4 vColor;',
+      'varying float lifeLeft;',
 
-			'//Scale back to range',
-			'return c / 255.0;',
-			'}',
+      'void main() {',
 
-			'vec4 pack(const in float depth)',
-			'{',
-			'const vec4 bit_shift = vec4(256.0*256.0*256.0, 256.0*256.0, 256.0, 1.0);',
-			'const vec4 bit_mask	= vec4(0.0, 1.0/256.0, 1.0/256.0, 1.0/256.0);',
-			'vec4 res = mod(depth*bit_shift*vec4(255), vec4(256))/vec4(255);',
-			'res -= res.xxyz * bit_mask;',
-			'return res;',
-			'}',
+      '// unpack things from our attributes',
+      'vColor = encode_float( particleVelColSizeLife.y );',
 
-			'float unpack(const in vec4 rgba_depth)',
-			'{',
-			'const vec4 bit_shift = vec4(1.0/(256.0*256.0*256.0), 1.0/(256.0*256.0), 1.0/256.0, 1.0);',
-			'float depth = dot(rgba_depth, bit_shift);',
-			'return depth;',
-			'}',
+      '// convert our velocity back into a value we can use',
+      'vec4 velTurb = encode_float( particleVelColSizeLife.x );',
+      'vec3 velocity = vec3( velTurb.xyz );',
+      'float turbulence = velTurb.w;',
 
-			'uniform float uTime;',
-			'uniform float uScale;',
-			'uniform sampler2D tNoise;',
+      'vec3 newPosition;',
 
-			'attribute vec4 particlePositionsStartTime;',
-			'attribute vec4 particleVelColSizeLife;',
+      'float timeElapsed = uTime - particlePositionsStartTime.a;',
 
-			'varying vec4 vColor;',
-			'varying float lifeLeft;',
+      'lifeLeft = 1. - (timeElapsed / particleVelColSizeLife.w);',
 
-			'void main() {',
+      'gl_PointSize = ( uScale * particleVelColSizeLife.z ) * lifeLeft;',
 
-			'// unpack things from our attributes',
-			'vColor = encode_float( particleVelColSizeLife.y );',
+      'velocity.x = ( velocity.x - .5 ) * 3.;',
+      'velocity.y = ( velocity.y - .5 ) * 3.;',
+      'velocity.z = ( velocity.z - .5 ) * 3.;',
 
-			'// convert our velocity back into a value we can use',
-			'vec4 velTurb = encode_float( particleVelColSizeLife.x );',
-			'vec3 velocity = vec3( velTurb.xyz );',
-			'float turbulence = velTurb.w;',
+      'newPosition = particlePositionsStartTime.xyz + ( velocity * 10. ) * ( uTime - particlePositionsStartTime.a );',
 
-			'vec3 newPosition;',
+      'vec3 noise = texture2D( tNoise, vec2( newPosition.x * .015 + (uTime * .05), newPosition.y * .02 + (uTime * .015) )).rgb;',
+      'vec3 noiseVel = ( noise.rgb - .5 ) * 30.;',
 
-			'float timeElapsed = uTime - particlePositionsStartTime.a;',
+      'newPosition = mix(newPosition, newPosition + vec3(noiseVel * ( turbulence * 5. ) ), (timeElapsed / particleVelColSizeLife.a) );',
 
-			'lifeLeft = 1. - (timeElapsed / particleVelColSizeLife.w);',
+      'if( velocity.y > 0. && velocity.y < .05 ) {',
+      'lifeLeft = 0.;',
+      '}',
 
-			'gl_PointSize = ( uScale * particleVelColSizeLife.z ) * lifeLeft;',
+      'if( velocity.x < -1.45 ) {',
+      'lifeLeft = 0.;',
+      '}',
 
-			'velocity.x = ( velocity.x - .5 ) * 3.;',
-			'velocity.y = ( velocity.y - .5 ) * 3.;',
-			'velocity.z = ( velocity.z - .5 ) * 3.;',
+      'if( timeElapsed > 0. ) {',
+      'gl_Position = projectionMatrix * modelViewMatrix * vec4( newPosition, 1.0 );',
+      '} else {',
+      'gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );',
+      'lifeLeft = 0.;',
+      'gl_PointSize = 0.;',
+      '}',
+      '}'
 
-			'newPosition = particlePositionsStartTime.xyz + ( velocity * 10. ) * ( uTime - particlePositionsStartTime.a );',
+    ].join('\n'),
 
-			'vec3 noise = texture2D( tNoise, vec2( newPosition.x * .015 + (uTime * .05), newPosition.y * .02 + (uTime * .015) )).rgb;',
-			'vec3 noiseVel = ( noise.rgb - .5 ) * 30.;',
+    fragmentShader: [
 
-			'newPosition = mix(newPosition, newPosition + vec3(noiseVel * ( turbulence * 5. ) ), (timeElapsed / particleVelColSizeLife.a) );',
+      'float scaleLinear(float value, vec2 valueDomain) {',
+      'return (value - valueDomain.x) / (valueDomain.y - valueDomain.x);',
+      '}',
 
-			'if( velocity.y > 0. && velocity.y < .05 ) {',
-			'lifeLeft = 0.;',
-			'}',
+      'float scaleLinear(float value, vec2 valueDomain, vec2 valueRange) {',
+      'return mix(valueRange.x, valueRange.y, scaleLinear(value, valueDomain));',
+      '}',
 
-			'if( velocity.x < -1.45 ) {',
-			'lifeLeft = 0.;',
-			'}',
+      'varying vec4 vColor;',
+      'varying float lifeLeft;',
 
-			'if( timeElapsed > 0. ) {',
-			'gl_Position = projectionMatrix * modelViewMatrix * vec4( newPosition, 1.0 );',
-			'} else {',
-			'gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );',
-			'lifeLeft = 0.;',
-			'gl_PointSize = 0.;',
-			'}',
-			'}'
+      'uniform sampler2D tSprite;',
 
-		].join("\n"),
+      'void main() {',
 
-		fragmentShader: [
+      'float alpha = 0.;',
 
-			'float scaleLinear(float value, vec2 valueDomain) {',
-			'return (value - valueDomain.x) / (valueDomain.y - valueDomain.x);',
-			'}',
+      'if( lifeLeft > .995 ) {',
+      'alpha = scaleLinear( lifeLeft, vec2(1., .995), vec2(0., 1.));//mix( 0., 1., ( lifeLeft - .95 ) * 100. ) * .75;',
+      '} else {',
+      'alpha = lifeLeft * .75;',
+      '}',
 
-			'float scaleLinear(float value, vec2 valueDomain, vec2 valueRange) {',
-			'return mix(valueRange.x, valueRange.y, scaleLinear(value, valueDomain));',
-			'}',
+      'vec4 tex = texture2D( tSprite, gl_PointCoord );',
 
-			'varying vec4 vColor;',
-			'varying float lifeLeft;',
+      'gl_FragColor = vec4( vColor.rgb * tex.a, alpha * tex.a );',
+      '}'
 
-			'uniform sampler2D tSprite;',
+    ].join('\n')
 
-			'void main() {',
+  }
 
-			'float alpha = 0.;',
+  // preload a million random numbers
+  self.rand = []
 
-			'if( lifeLeft > .995 ) {',
-			'alpha = scaleLinear( lifeLeft, vec2(1., .995), vec2(0., 1.));//mix( 0., 1., ( lifeLeft - .95 ) * 100. ) * .75;',
-			'} else {',
-			'alpha = lifeLeft * .75;',
-			'}',
+  for (var i = 1e5; i > 0; i--) {
+    self.rand.push(Math.random() - 0.5)
+  }
 
-			'vec4 tex = texture2D( tSprite, gl_PointCoord );',
+  self.random = function () {
+    return ++i >= self.rand.length ? self.rand[i = 1] : self.rand[i]
+  }
 
-			'gl_FragColor = vec4( vColor.rgb * tex.a, alpha * tex.a );',
-			'}'
+  var textureLoader = new THREE.TextureLoader()
 
-		].join("\n")
+  self.particleNoiseTex = self.PARTICLE_NOISE_TEXTURE || textureLoader.load('textures/perlin-512.png')
+  self.particleNoiseTex.wrapS = self.particleNoiseTex.wrapT = THREE.RepeatWrapping
 
-	};
+  self.particleSpriteTex = self.PARTICLE_SPRITE_TEXTURE || textureLoader.load('textures/particle2.png')
+  self.particleSpriteTex.wrapS = self.particleSpriteTex.wrapT = THREE.RepeatWrapping
 
-	// preload a million random numbers
-	self.rand = [];
+  self.particleShaderMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    uniforms: {
+      'uTime': {
+        value: 0.0
+      },
+      'uScale': {
+        value: 1.0
+      },
+      'tNoise': {
+        value: self.particleNoiseTex
+      },
+      'tSprite': {
+        value: self.particleSpriteTex
+      }
+    },
+    blending: THREE.AdditiveBlending,
+    vertexShader: GPUParticleShader.vertexShader,
+    fragmentShader: GPUParticleShader.fragmentShader
+  })
 
-	for (var i = 1e5; i > 0; i--) {
-		self.rand.push(Math.random() - .5);
-	}
+  // define defaults for all values
+  self.particleShaderMat.defaultAttributeValues.particlePositionsStartTime = [0, 0, 0, 0]
+  self.particleShaderMat.defaultAttributeValues.particleVelColSizeLife = [0, 0, 0, 0]
 
-	self.random = function() {
-		return ++i >= self.rand.length ? self.rand[i = 1] : self.rand[i];
-	};
+  self.particleContainers = []
 
-	var textureLoader = new THREE.TextureLoader();
+  // extend Object3D
+  THREE.Object3D.apply(this, arguments)
 
-	self.particleNoiseTex = self.PARTICLE_NOISE_TEXTURE || textureLoader.load("textures/perlin-512.png");
-	self.particleNoiseTex.wrapS = self.particleNoiseTex.wrapT = THREE.RepeatWrapping;
+  this.init = function () {
+    for (var i = 0; i < self.PARTICLE_CONTAINERS; i++) {
+      var c = new THREE.GPUParticleContainer(self.PARTICLES_PER_CONTAINER, self)
+      self.particleContainers.push(c)
+      self.add(c)
+    }
+  }
 
-	self.particleSpriteTex = self.PARTICLE_SPRITE_TEXTURE || textureLoader.load("textures/particle2.png");
-	self.particleSpriteTex.wrapS = self.particleSpriteTex.wrapT = THREE.RepeatWrapping;
+  this.spawnParticle = function (options) {
+    self.PARTICLE_CURSOR++
+    if (self.PARTICLE_CURSOR >= self.PARTICLE_COUNT) {
+      self.PARTICLE_CURSOR = 1
+    }
 
-	self.particleShaderMat = new THREE.ShaderMaterial({
-		transparent: true,
-		depthWrite: false,
-		uniforms: {
-			"uTime": {
-				value: 0.0
-			},
-			"uScale": {
-				value: 1.0
-			},
-			"tNoise": {
-				value: self.particleNoiseTex
-			},
-			"tSprite": {
-				value: self.particleSpriteTex
-			}
-		},
-		blending: THREE.AdditiveBlending,
-		vertexShader: GPUParticleShader.vertexShader,
-		fragmentShader: GPUParticleShader.fragmentShader
-	});
+    var currentContainer = self.particleContainers[Math.floor(self.PARTICLE_CURSOR / self.PARTICLES_PER_CONTAINER)]
 
-	// define defaults for all values
-	self.particleShaderMat.defaultAttributeValues.particlePositionsStartTime = [0, 0, 0, 0];
-	self.particleShaderMat.defaultAttributeValues.particleVelColSizeLife = [0, 0, 0, 0];
+    currentContainer.spawnParticle(options)
+  }
 
-	self.particleContainers = [];
+  this.update = function (time) {
+    for (var i = 0; i < self.PARTICLE_CONTAINERS; i++) {
+      self.particleContainers[i].update(time)
+    }
+  }
 
+  this.init()
+}
 
-	// extend Object3D
-	THREE.Object3D.apply(this, arguments);
-
-	this.init = function() {
-
-		for (var i = 0; i < self.PARTICLE_CONTAINERS; i++) {
-
-			var c = new THREE.GPUParticleContainer(self.PARTICLES_PER_CONTAINER, self);
-			self.particleContainers.push(c);
-			self.add(c);
-
-		}
-
-	};
-
-	this.spawnParticle = function(options) {
-
-		self.PARTICLE_CURSOR++;
-		if (self.PARTICLE_CURSOR >= self.PARTICLE_COUNT) {
-			self.PARTICLE_CURSOR = 1;
-		}
-
-		var currentContainer = self.particleContainers[Math.floor(self.PARTICLE_CURSOR / self.PARTICLES_PER_CONTAINER)];
-
-		currentContainer.spawnParticle(options);
-
-	};
-
-	this.update = function(time) {
-		for (var i = 0; i < self.PARTICLE_CONTAINERS; i++) {
-
-			self.particleContainers[i].update(time);
-
-		}
-	};
-
-	this.init();
-
-};
-
-THREE.GPUParticleSystem.prototype = Object.create(THREE.Object3D.prototype);
-THREE.GPUParticleSystem.prototype.constructor = THREE.GPUParticleSystem;
-
+THREE.GPUParticleSystem.prototype = Object.create(THREE.Object3D.prototype)
+THREE.GPUParticleSystem.prototype.constructor = THREE.GPUParticleSystem
 
 // Subclass for particle containers, allows for very large arrays to be spread out
-THREE.GPUParticleContainer = function(maxParticles, particleSystem) {
+THREE.GPUParticleContainer = function (maxParticles, particleSystem) {
+  var self = this
+  self.PARTICLE_COUNT = maxParticles || 100000
+  self.PARTICLE_CURSOR = 0
+  self.time = 0
+  self.DPR = window.devicePixelRatio
+  self.GPUParticleSystem = particleSystem
 
-	var self = this;
-	self.PARTICLE_COUNT = maxParticles || 100000;
-	self.PARTICLE_CURSOR = 0;
-	self.time = 0;
-	self.DPR = window.devicePixelRatio;
-	self.GPUParticleSystem = particleSystem;
+  var particlesPerArray = Math.floor(self.PARTICLE_COUNT / self.MAX_ATTRIBUTES)
 
-	var particlesPerArray = Math.floor(self.PARTICLE_COUNT / self.MAX_ATTRIBUTES);
+  // extend Object3D
+  THREE.Object3D.apply(this, arguments)
 
-	// extend Object3D
-	THREE.Object3D.apply(this, arguments);
+  // construct a couple small arrays used for packing variables into floats etc
+  var UINT8_VIEW = new Uint8Array(4)
+  var FLOAT_VIEW = new Float32Array(UINT8_VIEW.buffer)
 
-	// construct a couple small arrays used for packing variables into floats etc
-	var UINT8_VIEW = new Uint8Array(4);
-	var FLOAT_VIEW = new Float32Array(UINT8_VIEW.buffer);
+  function decodeFloat (x, y, z, w) {
+    UINT8_VIEW[0] = Math.floor(w)
+    UINT8_VIEW[1] = Math.floor(z)
+    UINT8_VIEW[2] = Math.floor(y)
+    UINT8_VIEW[3] = Math.floor(x)
+    return FLOAT_VIEW[0]
+  }
 
-	function decodeFloat(x, y, z, w) {
-		UINT8_VIEW[0] = Math.floor(w);
-		UINT8_VIEW[1] = Math.floor(z);
-		UINT8_VIEW[2] = Math.floor(y);
-		UINT8_VIEW[3] = Math.floor(x);
-		return FLOAT_VIEW[0]
-	}
+  function componentToHex (c) {
+    var hex = c.toString(16)
+    return hex.length == 1 ? '0' + hex : hex
+  }
 
-	function componentToHex(c) {
-		var hex = c.toString(16);
-		return hex.length == 1 ? "0" + hex : hex;
-	}
+  function rgbToHex (r, g, b) {
+    return '#' + componentToHex(r) + componentToHex(g) + componentToHex(b)
+  }
 
-	function rgbToHex(r, g, b) {
-		return "#" + componentToHex(r) + componentToHex(g) + componentToHex(b);
-	}
+  function hexToRgb (hex) {
+    var r = hex >> 16
+    var g = (hex & 0x00FF00) >> 8
+    var b = hex & 0x0000FF
 
-	function hexToRgb(hex) {
-		var r = hex >> 16;
-		var g = (hex & 0x00FF00) >> 8;
-		var b = hex & 0x0000FF;
+    if (r > 0) r--
+    if (g > 0) g--
+    if (b > 0) b--
 
-		if (r > 0) r--;
-		if (g > 0) g--;
-		if (b > 0) b--;
+    return [r, g, b]
+  }
 
-		return [r, g, b];
-	}
+  self.particles = []
+  self.deadParticles = []
+  self.particlesAvailableSlot = []
 
-	self.particles = [];
-	self.deadParticles = [];
-	self.particlesAvailableSlot = [];
+  // create a container for particles
+  self.particleUpdate = false
 
-	// create a container for particles
-	self.particleUpdate = false;
+  // Shader Based Particle System
+  self.particleShaderGeo = new THREE.BufferGeometry()
 
-	// Shader Based Particle System
-	self.particleShaderGeo = new THREE.BufferGeometry();
+  // new hyper compressed attributes
+  self.particleVertices = new Float32Array(self.PARTICLE_COUNT * 3) // position
+  self.particlePositionsStartTime = new Float32Array(self.PARTICLE_COUNT * 4) // position
+  self.particleVelColSizeLife = new Float32Array(self.PARTICLE_COUNT * 4)
 
-	// new hyper compressed attributes
-	self.particleVertices = new Float32Array(self.PARTICLE_COUNT * 3); // position
-	self.particlePositionsStartTime = new Float32Array(self.PARTICLE_COUNT * 4); // position
-	self.particleVelColSizeLife = new Float32Array(self.PARTICLE_COUNT * 4);
+  for (var i = 0; i < self.PARTICLE_COUNT; i++) {
+    self.particlePositionsStartTime[i * 4 + 0] = 100 // x
+    self.particlePositionsStartTime[i * 4 + 1] = 0 // y
+    self.particlePositionsStartTime[i * 4 + 2] = 0.0 // z
+    self.particlePositionsStartTime[i * 4 + 3] = 0.0 // startTime
 
-	for (var i = 0; i < self.PARTICLE_COUNT; i++) {
-		self.particlePositionsStartTime[i * 4 + 0] = 100; //x
-		self.particlePositionsStartTime[i * 4 + 1] = 0; //y
-		self.particlePositionsStartTime[i * 4 + 2] = 0.0; //z
-		self.particlePositionsStartTime[i * 4 + 3] = 0.0; //startTime
+    self.particleVertices[i * 3 + 0] = 0 // x
+    self.particleVertices[i * 3 + 1] = 0 // y
+    self.particleVertices[i * 3 + 2] = 0.0 // z
 
-		self.particleVertices[i * 3 + 0] = 0; //x
-		self.particleVertices[i * 3 + 1] = 0; //y
-		self.particleVertices[i * 3 + 2] = 0.0; //z
+    self.particleVelColSizeLife[i * 4 + 0] = decodeFloat(128, 128, 0, 0) // vel
+    self.particleVelColSizeLife[i * 4 + 1] = decodeFloat(0, 254, 0, 254) // color
+    self.particleVelColSizeLife[i * 4 + 2] = 1.0 // size
+    self.particleVelColSizeLife[i * 4 + 3] = 0.0 // lifespan
+  }
 
-		self.particleVelColSizeLife[i * 4 + 0] = decodeFloat(128, 128, 0, 0); //vel
-		self.particleVelColSizeLife[i * 4 + 1] = decodeFloat(0, 254, 0, 254); //color
-		self.particleVelColSizeLife[i * 4 + 2] = 1.0; //size
-		self.particleVelColSizeLife[i * 4 + 3] = 0.0; //lifespan
-	}
+  self.particleShaderGeo.addAttribute('position', new THREE.BufferAttribute(self.particleVertices, 3))
+  self.particleShaderGeo.addAttribute('particlePositionsStartTime', new THREE.BufferAttribute(self.particlePositionsStartTime, 4).setDynamic(true))
+  self.particleShaderGeo.addAttribute('particleVelColSizeLife', new THREE.BufferAttribute(self.particleVelColSizeLife, 4).setDynamic(true))
 
-	self.particleShaderGeo.addAttribute('position', new THREE.BufferAttribute(self.particleVertices, 3));
-	self.particleShaderGeo.addAttribute('particlePositionsStartTime', new THREE.BufferAttribute(self.particlePositionsStartTime, 4).setDynamic(true));
-	self.particleShaderGeo.addAttribute('particleVelColSizeLife', new THREE.BufferAttribute(self.particleVelColSizeLife, 4).setDynamic(true));
+  self.posStart = self.particleShaderGeo.getAttribute('particlePositionsStartTime')
+  self.velCol = self.particleShaderGeo.getAttribute('particleVelColSizeLife')
 
-	self.posStart = self.particleShaderGeo.getAttribute('particlePositionsStartTime');
-	self.velCol = self.particleShaderGeo.getAttribute('particleVelColSizeLife');
+  self.particleShaderMat = self.GPUParticleSystem.particleShaderMat
 
-	self.particleShaderMat = self.GPUParticleSystem.particleShaderMat;
+  this.init = function () {
+    self.particleSystem = new THREE.Points(self.particleShaderGeo, self.particleShaderMat)
+    self.particleSystem.frustumCulled = false
+    this.add(self.particleSystem)
+  }
 
-	this.init = function() {
-		self.particleSystem = new THREE.Points(self.particleShaderGeo, self.particleShaderMat);
-		self.particleSystem.frustumCulled = false;
-		this.add(self.particleSystem);
-	};
+  var options = {},
+    position = new THREE.Vector3(),
+    velocity = new THREE.Vector3(),
+    positionRandomness = 0.0,
+    velocityRandomness = 0.0,
+    color = 0xffffff,
+    colorRandomness = 0.0,
+    turbulence = 0.0,
+    lifetime = 0.0,
+    size = 0.0,
+    sizeRandomness = 0.0,
+    smoothPosition = false,
+    i
 
-	var options = {},
-		position = new THREE.Vector3(),
-		velocity = new THREE.Vector3(),
-		positionRandomness = 0.,
-		velocityRandomness = 0.,
-		color = 0xffffff,
-		colorRandomness = 0.,
-		turbulence = 0.,
-		lifetime = 0.,
-		size = 0.,
-		sizeRandomness = 0.,
-		smoothPosition = false,
-		i;
+  var maxVel = 2
+  var maxSource = 250
+  this.offset = 0
+  this.count = 0
 
-	var maxVel = 2;
-	var maxSource = 250;
-	this.offset = 0;
-	this.count = 0;
+  this.spawnParticle = function (options) {
+    options = options || {}
 
-	this.spawnParticle = function(options) {
+    // setup reasonable default values for all arguments
+    position = options.position !== undefined ? position.copy(options.position) : position.set(0.0, 0.0, 0.0)
+    velocity = options.velocity !== undefined ? velocity.copy(options.velocity) : velocity.set(0.0, 0.0, 0.0)
+    positionRandomness = options.positionRandomness !== undefined ? options.positionRandomness : 0.0
+    velocityRandomness = options.velocityRandomness !== undefined ? options.velocityRandomness : 0.0
+    color = options.color !== undefined ? options.color : 0xffffff
+    colorRandomness = options.colorRandomness !== undefined ? options.colorRandomness : 1.0
+    turbulence = options.turbulence !== undefined ? options.turbulence : 1.0
+    lifetime = options.lifetime !== undefined ? options.lifetime : 5.0
+    size = options.size !== undefined ? options.size : 10
+    sizeRandomness = options.sizeRandomness !== undefined ? options.sizeRandomness : 0.0
+    smoothPosition = options.smoothPosition !== undefined ? options.smoothPosition : false
 
-		options = options || {};
+    if (self.DPR !== undefined) size *= self.DPR
 
-		// setup reasonable default values for all arguments
-		position = options.position !== undefined ? position.copy(options.position) : position.set(0., 0., 0.);
-		velocity = options.velocity !== undefined ? velocity.copy(options.velocity) : velocity.set(0., 0., 0.);
-		positionRandomness = options.positionRandomness !== undefined ? options.positionRandomness : 0.0;
-		velocityRandomness = options.velocityRandomness !== undefined ? options.velocityRandomness : 0.0;
-		color = options.color !== undefined ? options.color : 0xffffff;
-		colorRandomness = options.colorRandomness !== undefined ? options.colorRandomness : 1.0;
-		turbulence = options.turbulence !== undefined ? options.turbulence : 1.0;
-		lifetime = options.lifetime !== undefined ? options.lifetime : 5.0;
-		size = options.size !== undefined ? options.size : 10;
-		sizeRandomness = options.sizeRandomness !== undefined ? options.sizeRandomness : 0.0;
-		smoothPosition = options.smoothPosition !== undefined ? options.smoothPosition : false;
+    i = self.PARTICLE_CURSOR
 
-		if (self.DPR !== undefined) size *= self.DPR;
+    self.posStart.array[i * 4 + 0] = position.x + ((particleSystem.random()) * positionRandomness) // - ( velocity.x * particleSystem.random() ); //x
+    self.posStart.array[i * 4 + 1] = position.y + ((particleSystem.random()) * positionRandomness) // - ( velocity.y * particleSystem.random() ); //y
+    self.posStart.array[i * 4 + 2] = position.z + ((particleSystem.random()) * positionRandomness) // - ( velocity.z * particleSystem.random() ); //z
+    self.posStart.array[i * 4 + 3] = self.time + (particleSystem.random() * 2e-2) // startTime
 
-		i = self.PARTICLE_CURSOR;
+    if (smoothPosition === true) {
+      self.posStart.array[i * 4 + 0] += -(velocity.x * particleSystem.random()) // x
+      self.posStart.array[i * 4 + 1] += -(velocity.y * particleSystem.random()) // y
+      self.posStart.array[i * 4 + 2] += -(velocity.z * particleSystem.random()) // z
+    }
 
-		self.posStart.array[i * 4 + 0] = position.x + ((particleSystem.random()) * positionRandomness); // - ( velocity.x * particleSystem.random() ); //x
-		self.posStart.array[i * 4 + 1] = position.y + ((particleSystem.random()) * positionRandomness); // - ( velocity.y * particleSystem.random() ); //y
-		self.posStart.array[i * 4 + 2] = position.z + ((particleSystem.random()) * positionRandomness); // - ( velocity.z * particleSystem.random() ); //z
-		self.posStart.array[i * 4 + 3] = self.time + (particleSystem.random() * 2e-2); //startTime
+    var velX = velocity.x + (particleSystem.random()) * velocityRandomness
+    var velY = velocity.y + (particleSystem.random()) * velocityRandomness
+    var velZ = velocity.z + (particleSystem.random()) * velocityRandomness
 
-		if (smoothPosition === true) {
-			self.posStart.array[i * 4 + 0] += -(velocity.x * particleSystem.random()); //x
-			self.posStart.array[i * 4 + 1] += -(velocity.y * particleSystem.random()); //y
-			self.posStart.array[i * 4 + 2] += -(velocity.z * particleSystem.random()); //z
-		}
+    // convert turbulence rating to something we can pack into a vec4
+    var turbulence = Math.floor(turbulence * 254)
 
-		var velX = velocity.x + (particleSystem.random()) * velocityRandomness;
-		var velY = velocity.y + (particleSystem.random()) * velocityRandomness;
-		var velZ = velocity.z + (particleSystem.random()) * velocityRandomness;
+    // clamp our value to between 0. and 1.
+    velX = Math.floor(maxSource * ((velX - -maxVel) / (maxVel - -maxVel)))
+    velY = Math.floor(maxSource * ((velY - -maxVel) / (maxVel - -maxVel)))
+    velZ = Math.floor(maxSource * ((velZ - -maxVel) / (maxVel - -maxVel)))
 
-		// convert turbulence rating to something we can pack into a vec4
-		var turbulence = Math.floor(turbulence * 254);
+    self.velCol.array[i * 4 + 0] = decodeFloat(velX, velY, velZ, turbulence) // vel
 
-		// clamp our value to between 0. and 1.
-		velX = Math.floor(maxSource * ((velX - -maxVel) / (maxVel - -maxVel)));
-		velY = Math.floor(maxSource * ((velY - -maxVel) / (maxVel - -maxVel)));
-		velZ = Math.floor(maxSource * ((velZ - -maxVel) / (maxVel - -maxVel)));
+    var rgb = hexToRgb(color)
 
-		self.velCol.array[i * 4 + 0] = decodeFloat(velX, velY, velZ, turbulence); //vel
+    for (var c = 0; c < rgb.length; c++) {
+      rgb[c] = Math.floor(rgb[c] + ((particleSystem.random()) * colorRandomness) * 254)
+      if (rgb[c] > 254) rgb[c] = 254
+      if (rgb[c] < 0) rgb[c] = 0
+    }
 
-		var rgb = hexToRgb(color);
+    self.velCol.array[i * 4 + 1] = decodeFloat(rgb[0], rgb[1], rgb[2], 254) // color
+    self.velCol.array[i * 4 + 2] = size + (particleSystem.random()) * sizeRandomness // size
+    self.velCol.array[i * 4 + 3] = lifetime // lifespan
 
-		for (var c = 0; c < rgb.length; c++) {
-			rgb[c] = Math.floor(rgb[c] + ((particleSystem.random()) * colorRandomness) * 254);
-			if (rgb[c] > 254) rgb[c] = 254;
-			if (rgb[c] < 0) rgb[c] = 0;
-		}
+    if (this.offset == 0) {
+      this.offset = self.PARTICLE_CURSOR
+    }
 
-		self.velCol.array[i * 4 + 1] = decodeFloat(rgb[0], rgb[1], rgb[2], 254); //color
-		self.velCol.array[i * 4 + 2] = size + (particleSystem.random()) * sizeRandomness; //size
-		self.velCol.array[i * 4 + 3] = lifetime; //lifespan
+    self.count++
 
-		if (this.offset == 0) {
-			this.offset = self.PARTICLE_CURSOR;
-		}
+    self.PARTICLE_CURSOR++
 
-		self.count++;
+    if (self.PARTICLE_CURSOR >= self.PARTICLE_COUNT) {
+      self.PARTICLE_CURSOR = 0
+    }
 
-		self.PARTICLE_CURSOR++;
+    self.particleUpdate = true
+  }
 
-		if (self.PARTICLE_CURSOR >= self.PARTICLE_COUNT) {
-			self.PARTICLE_CURSOR = 0;
-		}
+  this.update = function (time) {
+    self.time = time
+    self.particleShaderMat.uniforms['uTime'].value = time
 
-		self.particleUpdate = true;
+    this.geometryUpdate()
+  }
 
-	};
+  this.geometryUpdate = function () {
+    if (self.particleUpdate == true) {
+      self.particleUpdate = false
 
-	this.update = function(time) {
+      // if we can get away with a partial buffer update, do so
+      if (self.offset + self.count < self.PARTICLE_COUNT) {
+        self.posStart.updateRange.offset = self.velCol.updateRange.offset = self.offset * 4
+        self.posStart.updateRange.count = self.velCol.updateRange.count = self.count * 4
+      } else {
+        self.posStart.updateRange.offset = 0
+        self.posStart.updateRange.count = self.velCol.updateRange.count = (self.PARTICLE_COUNT * 4)
+      }
 
-		self.time = time;
-		self.particleShaderMat.uniforms['uTime'].value = time;
+      self.posStart.needsUpdate = true
+      self.velCol.needsUpdate = true
 
-		this.geometryUpdate();
+      self.offset = 0
+      self.count = 0
+    }
+  }
 
-	};
+  this.init()
+}
 
-	this.geometryUpdate = function() {
-		if (self.particleUpdate == true) {
-			self.particleUpdate = false;
-
-			// if we can get away with a partial buffer update, do so
-			if (self.offset + self.count < self.PARTICLE_COUNT) {
-				self.posStart.updateRange.offset = self.velCol.updateRange.offset = self.offset * 4;
-				self.posStart.updateRange.count = self.velCol.updateRange.count = self.count * 4;
-			} else {
-				self.posStart.updateRange.offset = 0;
-				self.posStart.updateRange.count = self.velCol.updateRange.count = (self.PARTICLE_COUNT * 4);
-			}
-
-			self.posStart.needsUpdate = true;
-			self.velCol.needsUpdate = true;
-
-			self.offset = 0;
-			self.count = 0;
-		}
-	};
-
-	this.init();
-
-};
-
-THREE.GPUParticleContainer.prototype = Object.create(THREE.Object3D.prototype);
-THREE.GPUParticleContainer.prototype.constructor = THREE.GPUParticleContainer;
+THREE.GPUParticleContainer.prototype = Object.create(THREE.Object3D.prototype)
+THREE.GPUParticleContainer.prototype.constructor = THREE.GPUParticleContainer

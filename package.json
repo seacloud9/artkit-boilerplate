@@ -1,19 +1,32 @@
 {
-  "name": "ducks-ahoy",
+  "name": "artkit-boilerplate",
   "version": "0.0.0",
-  "description": "Ducks, Ahoy!",
-  "author": null,
+  "description": "artkit",
+  "author": "Brendon Smith",
   "private": true,
   "scripts": {
+    "fixcode": "standard --fix",
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "eject": "expo eject",
     "clean:babelrc": "find ./node_modules -name react-packager -prune -o -name '.babelrc' -print | xargs rm -f",
     "postinstall": "npm run clean:babelrc"
   },
   "main": "node_modules/expo/AppEntry.js",
   "dependencies": {
-    "expo": "^21.0.0",
-    "expo-three": "^2.0.2",
-    "react": "16.0.0-alpha.12",
-    "react-native": "https://github.com/expo/react-native/archive/sdk-21.0.2.tar.gz",
-    "three": "^0.87.1"
+    "expo": "^28.0.0",
+    "expo-graphics": "1.0.0-alpha.1",
+    "expo-three": "^3.0.0-alpha.5",
+    "react": "16.3.1",
+    "react-native": "https://github.com/expo/react-native/archive/sdk-28.0.0.tar.gz",
+    "three": "0.87.1"
+  },
+  "devDependencies": {
+    "babel-preset-expo": "^5.0.0"
+  },
+  "standard": {
+    "parser": "babel-eslint",
+    "ignore": []
   }
 }

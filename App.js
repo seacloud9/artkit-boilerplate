@@ -1,17 +1,20 @@
 
 import React from 'react';
-import Expo from 'expo';
-import * as THREE from 'three';
-import ExpoTHREE from 'expo-three';
-
-
-import { Text, View } from 'react-native';
-
+import { AR, Asset } from 'expo';
+import ExpoTHREE, { AR as ThreeAR } from 'expo-three'
+import { View as GraphicsView } from 'expo-graphics'
+import RibbonGroup from './RibbonGroup'
+import * as THREE from 'three'
 //import { Button } from './components';
-//require('./assets/components/GPUParticleSystem');
+require('./assets/components/GPUParticleSystem')
 
 export default class App extends React.Component {
 
+  constructor(props){
+    super(props)
+    this.onContextCreate = this.onContextCreate.bind(this)
+    this.onRender = this.onRender.bind(this)
+  }
   // options passed during each spawned
   options = {
     position: new THREE.Vector3(),
@@ -24,61 +27,73 @@ export default class App extends React.Component {
     lifetime: 2,
     size: 50, //5
     sizeRandomness: 1
-  };
+  }
+
   spawnerOptions = {
     spawnRate: 1500,
     horizontalSpeed: 1.0,
     verticalSpeed: 1.33,
     timeScale: 1
-  };
+  }
 
-  tick = 0;
-  clock = new THREE.Clock();
+  tick = 0
+  clock = new THREE.Clock()
 
-
-
-  renderScene = () => (
-      <Expo.GLView
-        ref = {
-                (ref) => this._glView = ref
-            }
-        // onLayout={({nativeEvent:{layout:{width, height}}}) => this.onResize({width, height}) }
-        style={{ flex: 1 }}
-        onContextCreate={this._onGLContextCreate}
-      />
-  )
-
-
-  render = () => (
-    <View style={{ flex: 1 }}>
-      {this.renderScene()}
-      {/* {this.renderInfo()} */}
-    </View>
-  );
-
-  _onGLContextCreate = async (gl) => {
-    const { drawingBufferWidth: width, drawingBufferHeight: height } = gl;
-    this.particleSystem = null
-    this.arSession = await this._glView.startARSessionAsync()
-
-
-    this.scene = this.configureScene();
-    this.camera = this.configureCamera({ width, height });
-    
-    //this.controls = new THREE.OrbitControls(this.camera);
-    
+  componentDidMount() {
+    // Turn off extra warnings
+    //THREE.suppressExpoWarnings(true)
+    ThreeAR.suppressWarnings()
+  }
   
-    // this.configureLights();
-    // NOTE: How to create an `Expo.GLView`-compatible THREE renderer
-    this.renderer = ExpoTHREE.createRenderer({ gl, antialias: true, alpha: true });
-    this.renderer.setSize(width, height);
-    //this.renderer.setClearColor(0x000000);
-    this.scene.background = ExpoTHREE.createARBackgroundTexture(this.arSession, this.renderer)
-    //this.renderer.setClearColor(0xCC0099)
-    let lastFrameTime;
+ 
+  render() {
+    // You need to add the `isArEnabled` & `arTrackingConfiguration` props.
+    // `isArRunningStateEnabled` Will show us the play/pause button in the corner.
+    // `isArCameraStateEnabled` Will render the camera tracking information on the screen.
+    // `arTrackingConfiguration` denotes which camera the AR Session will use. 
+    // World for rear, Face for front (iPhone X only)
+    return (
+      <GraphicsView
+        style={{ flex: 1 }}
+        onContextCreate={this.onContextCreate}
+        onRender={this.onRender}
+        onResize={this.onResize}
+        isArEnabled
+        isArRunningStateEnabled
+        isArCameraStateEnabled
+        arTrackingConfiguration={AR.TrackingConfigurations.World}
+      />
+    );
+  }
+
+  onContextCreate = async ({ gl, scale: pixelRatio, width, height }) => {
+    // This will allow ARKit to collect Horizontal surfaces
+    AR.setPlaneDetection(AR.PlaneDetectionTypes.Horizontal)
+
+    // Create a 3D renderer
+    this.renderer = new ExpoTHREE.Renderer({
+      gl,
+      pixelRatio,
+      width,
+      height,
+    });
+
+    // We will add all of our meshes to this scene.
+    this.scene = new THREE.Scene()
+    // This will create a camera texture and use it as the background for our scene
+    this.scene.background = new ThreeAR.BackgroundTexture(this.renderer)
+    // Now we make a camera that matches the device orientation. 
+    // Ex: When we look down this camera will rotate to look down too!
+    this.camera = new ThreeAR.Camera(width, height, 0.01, 10000)
+    this.camera.position.z = 150
     await this.configureParticles()
-    const render = () => {
-      this._requestAnimationFrameID = requestAnimationFrame(render);
+    THREE.ribbonGroup = new RibbonGroup(this.scene)
+	  THREE.ribbonGroup.init()
+
+}
+
+  onRender = () => {
+     // this._requestAnimationFrameID = requestAnimationFrame(thisrender);
 
       const now = 0.001 * global.nativePerformanceNow();
       const dt = typeof lastFrameTime !== 'undefined'
@@ -105,66 +120,41 @@ export default class App extends React.Component {
             this.particleSystem.spawnParticle(this.options);
           }
         }
+       
        this.particleSystem.update(this.tick);
       }
-      
+      THREE.ribbonGroup.update()
 
       // stats.update();
 
-      this.camera.lookAt(this.scene.position);
-      this.renderer.render(this.scene, this.camera);
+      this.camera.lookAt(this.scene.position)
 
-      // NOTE: At the end of each frame, notify `Expo.GLView` with the below
-      gl.endFrameEXP();
+      
+      this.renderer.render(this.scene, this.camera)
       lastFrameTime = now;
-
-    }
-
-    render();
-  }
-
-  componentWillUnmount() {
-    if (this._requestAnimationFrameID) {
-      cancelAnimationFrame(this._requestAnimationFrameID);
-    }
-  }
+}
 
 
-  configureScene = () => {
-    // scene
-    let scene = new THREE.Scene();
-    return scene;
-  }
-
-  configureCamera = ({ width, height }) => {
-    // camera
-    //let camera = new THREE.PerspectiveCamera(28, width / height, 1, 10000);
-    const camera = ExpoTHREE.createARCamera(this.arSession, width, height, 0.01, 10000)
-    camera.position.z = 150;
-    return camera
-  }
 
   configureParticles = async () => {
-
     var particleNoiseTex = await ExpoTHREE.createTextureAsync({
       asset: Expo.Asset.fromModule(require('./assets/images/perlin-512.png')),
-    });
+    })
     var particleSpriteTex = await ExpoTHREE.createTextureAsync({
       asset: Expo.Asset.fromModule(require('./assets/images/particle2.png')),
-    });
+    })
     // The GPU Particle system extends THREE.Object3D, and so you can use it
     // as you would any other scene graph component.	Particle positions will be
     // relative to the position of the particle system, but you will probably only need one
     // system for your whole scene
-    /*
+    
     this.particleSystem = new THREE.GPUParticleSystem({
       maxParticles: 500,
       particleNoiseTex,
       particleSpriteTex,
-    });
+    })
 
-    this.scene.add(this.particleSystem);
-    */
+    this.scene.add(this.particleSystem)
   }
 
   ///TODO: Build Options componnet
